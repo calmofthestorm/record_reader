@@ -1,0 +1,16 @@
+[package]
+name = "record_reader"
+version = "1.0.0"
+authors = ["Alex Roper <alex@aroper.net>"]
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+byteorder = "1.4"
+digest = {version = "0.10", optional = true}
+log = "0.4"
+tempdir = "0.3"
+thiserror = "1.0"
+
+[features]
+default = ["digest"]

@@ -1,0 +1,70 @@
+[package]
+name = "record_reader-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+byteorder = "1.5"
+libfuzzer-sys = "0.4"
+record_reader = { path = ".." }
+sha2 = "0.10"
+
+[[bin]]
+name = "maybe_read_record_from_buffer"
+path = "fuzz_targets/maybe_read_record_from_buffer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "io_record_reader_from_read"
+path = "fuzz_targets/io_record_reader_from_read.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "roundtrip_buffer"
+path = "fuzz_targets/roundtrip_buffer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "io_roundtrip"
+path = "fuzz_targets/io_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cross_impl_equivalence"
+path = "fuzz_targets/cross_impl_equivalence.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stateful_offset_size"
+path = "fuzz_targets/stateful_offset_size.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hashing_wrapper_consistency"
+path = "fuzz_targets/hashing_wrapper_consistency.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "format_boundary_cases"
+path = "fuzz_targets/format_boundary_cases.rs"
+test = false
+doc = false
+bench = false

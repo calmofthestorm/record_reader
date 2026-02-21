@@ -24,7 +24,7 @@ pub struct BufferRecordReader<'a> {
 // BufferRecordWriter
 
 impl RecordWriter for BufferRecordWriter {
-    fn write_record<'a>(&'a mut self, data: &[u8]) -> Result<()> {
+    fn write_record(&mut self, data: &[u8]) -> Result<()> {
         match self.format {
             Format::Record32 => {
                 let offset = self.records.len();
@@ -57,8 +57,16 @@ impl RecordWriter for BufferRecordWriter {
 
 impl BufferRecordWriter {
     pub fn new(format: Format) -> BufferRecordWriter {
+        Self::with_capacity(format, 0)
+    }
+
+    pub fn with_capacity(format: Format, capacity: usize) -> BufferRecordWriter {
+        Self::from_vec(format, Vec::with_capacity(capacity))
+    }
+
+    pub fn from_vec(format: Format, inner: Vec<u8>) -> BufferRecordWriter {
         BufferRecordWriter {
-            records: Vec::default(),
+            records: inner,
             format,
         }
     }
@@ -68,16 +76,16 @@ impl BufferRecordWriter {
     }
 }
 
-impl Into<Vec<u8>> for BufferRecordWriter {
-    fn into(self) -> Vec<u8> {
-        self.records
+impl From<BufferRecordWriter> for Vec<u8> {
+    fn from(val: BufferRecordWriter) -> Self {
+        val.records
     }
 }
 
 // BufferRecordReader
 
 impl RecordReader for BufferRecordReader<'_> {
-    fn maybe_read_record<'a>(&'a mut self) -> Result<Option<&'a [u8]>> {
+    fn maybe_read_record(&mut self) -> Result<Option<&[u8]>> {
         maybe_read_record_from_buffer(
             &self.records,
             &mut self.offset,
@@ -93,7 +101,7 @@ impl BufferRecordReader<'_> {
         records: Cow<'a, [u8]>,
         format: Format,
         max_record_size: usize,
-    ) -> BufferRecordReader {
+    ) -> BufferRecordReader<'a> {
         BufferRecordReader {
             records,
             offset: 0,
@@ -139,11 +147,30 @@ mod tests {
     fn buffer_buffer(format: Format) {
         test_general(
             format,
-            |format| BufferRecordWriter::new(format),
+            BufferRecordWriter::new,
             |writer, format, max_read_size| {
                 BufferRecordReader::new(writer.into_cow(), format, max_read_size)
             },
         );
+        match format {
+            Format::Record | Format::Record32 => {
+                test_records_toobig_format(
+                    format,
+                    BufferRecordWriter::new,
+                    |writer, format, max_read_size| {
+                        BufferRecordReader::new(writer.into_cow(), format, max_read_size)
+                    },
+                );
+                test_records_max_size_boundary(
+                    format,
+                    BufferRecordWriter::new,
+                    |writer, format, max_read_size| {
+                        BufferRecordReader::new(writer.into_cow(), format, max_read_size)
+                    },
+                );
+            }
+            Format::Chunk => {}
+        }
     }
 
     #[test]
@@ -154,5 +181,47 @@ mod tests {
     #[test]
     fn buffer_buffer_chunks() {
         buffer_buffer(Format::Chunk)
+    }
+
+    #[test]
+    fn buffer_buffer_records32() {
+        buffer_buffer(Format::Record32)
+    }
+
+    #[test]
+    fn into_owned_preserves_unread_records() {
+        let mut w = BufferRecordWriter::new(Format::Record);
+        w.write_record(b"one").unwrap();
+        w.write_record(b"two").unwrap();
+        let records: Vec<u8> = w.into();
+
+        let mut rr =
+            BufferRecordReader::new(std::borrow::Cow::Borrowed(&records), Format::Record, 16);
+        assert_eq!(rr.read_record().unwrap(), b"one");
+
+        let mut owned = rr.into_owned();
+        drop(records);
+        assert_eq!(owned.read_record().unwrap(), b"two");
+        assert!(owned.maybe_read_record().unwrap().is_none());
+    }
+
+    fn stops_at_first_oversized_record(format: Format) {
+        let mut w = BufferRecordWriter::new(format);
+        w.write_record(b"toolong").unwrap();
+        w.write_record(b"ok").unwrap();
+
+        let mut rr = BufferRecordReader::new(w.into_cow(), format, 3);
+        assert!(rr.maybe_read_record().is_err());
+        assert!(rr.maybe_read_record().is_err());
+    }
+
+    #[test]
+    fn record_stops_at_first_oversized_record() {
+        stops_at_first_oversized_record(Format::Record);
+    }
+
+    #[test]
+    fn record32_stops_at_first_oversized_record() {
+        stops_at_first_oversized_record(Format::Record32);
     }
 }

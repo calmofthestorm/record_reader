@@ -40,9 +40,9 @@ pub enum Format {
 /// Unlike an iterator, this only guarantees each returned slice is valid until
 /// the next call to [maybe_]read_record.
 pub trait RecordReader {
-    fn maybe_read_record<'a>(&'a mut self) -> Result<Option<&'a [u8]>>;
+    fn maybe_read_record(&mut self) -> Result<Option<&[u8]>>;
 
-    fn read_record<'a>(&'a mut self) -> Result<&'a [u8]> {
+    fn read_record(&mut self) -> Result<&[u8]> {
         self.maybe_read_record()?.context("empty")
     }
 }
@@ -50,4 +50,48 @@ pub trait RecordReader {
 pub trait RecordWriter {
     fn write_record(&mut self, data: &[u8]) -> Result<()>;
     fn flush(&mut self) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct EmptyReader;
+
+    impl RecordReader for EmptyReader {
+        fn maybe_read_record(&mut self) -> Result<Option<&[u8]>> {
+            Ok(None)
+        }
+    }
+
+    struct SingleReader {
+        data: Vec<u8>,
+        consumed: bool,
+    }
+
+    impl RecordReader for SingleReader {
+        fn maybe_read_record(&mut self) -> Result<Option<&[u8]>> {
+            if self.consumed {
+                Ok(None)
+            } else {
+                self.consumed = true;
+                Ok(Some(&self.data))
+            }
+        }
+    }
+
+    #[test]
+    fn read_record_returns_record_when_available() {
+        let mut rr = SingleReader {
+            data: b"hello".to_vec(),
+            consumed: false,
+        };
+        assert_eq!(rr.read_record().unwrap(), b"hello");
+    }
+
+    #[test]
+    fn read_record_returns_err_on_empty() {
+        let mut rr = EmptyReader;
+        assert!(rr.read_record().is_err());
+    }
 }

@@ -21,10 +21,33 @@ where
     W: RecordWriter,
     R: RecordReader,
 {
+    test_records_toobig_format(Format::Record, wf, rf);
+}
+
+pub fn test_records_toobig_format<WF, RF, W, R>(format: Format, wf: WF, rf: RF)
+where
+    WF: Fn(Format) -> W,
+    RF: Fn(W, Format, usize) -> R,
+    W: RecordWriter,
+    R: RecordReader,
+{
     let words = record_vector(&["123456789"]);
-    let mut w = wf(Format::Record);
+    let mut w = wf(format);
     write_records(&mut w, &words);
-    assert!(rf(w, Format::Record, 5).maybe_read_record().is_err());
+    assert!(rf(w, format, 5).maybe_read_record().is_err());
+}
+
+pub fn test_records_max_size_boundary<WF, RF, W, R>(format: Format, wf: WF, rf: RF)
+where
+    WF: Fn(Format) -> W,
+    RF: Fn(W, Format, usize) -> R,
+    W: RecordWriter,
+    R: RecordReader,
+{
+    let words = record_vector(&["12345", "a"]);
+    let mut w = wf(format);
+    write_records(&mut w, &words);
+    assert_eq!(read_records(&mut rf(w, format, 5)), words);
 }
 
 fn test_records<WF, RF, W, R>(wf: WF, rf: RF, format: Format)
@@ -42,7 +65,7 @@ where
     ] {
         let mut w = wf(format);
         let max_read_size = words.iter().map(String::len).max().unwrap_or(0);
-        write_records(&mut w, &words);
+        write_records(&mut w, words);
         assert_eq!(read_records(&mut rf(w, format, max_read_size)), *words);
     }
 }
@@ -67,7 +90,10 @@ where
             for read_size in sizes {
                 let mut w = wf(Format::Chunk);
                 write_chunks(&mut w, data, *write_size);
-                assert_eq!(&read_chunks(&mut rf(w, Format::Chunk, *read_size), *read_size), data);
+                assert_eq!(
+                    &read_chunks(&mut rf(w, Format::Chunk, *read_size), *read_size),
+                    data
+                );
             }
         }
     }
@@ -76,7 +102,7 @@ where
 fn write_chunks<RW: RecordWriter>(rw: &mut RW, mut data: &str, max_write_size: usize) {
     while !data.is_empty() {
         let write_size = std::cmp::min(max_write_size, data.len());
-        rw.write_record(data[..write_size].as_bytes()).unwrap();
+        rw.write_record(&data.as_bytes()[..write_size]).unwrap();
         data = &data[write_size..];
     }
 }

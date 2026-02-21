@@ -43,7 +43,7 @@ impl<R: Read> IoRecordReader<R> {
 }
 
 impl<R: Read> RecordReader for IoRecordReader<R> {
-    fn maybe_read_record<'a>(&'a mut self) -> Result<Option<&'a [u8]>> {
+    fn maybe_read_record(&mut self) -> Result<Option<&[u8]>> {
         match self.format {
             Format::Chunk => {
                 let mut buf = self.buf.as_mut_slice();
@@ -104,7 +104,7 @@ impl<R: Read> RecordReader for IoRecordReader<R> {
                 } else if n == 0 {
                     Ok(None)
                 } else {
-                    None.context("incomplete record header")
+                    anyhow::bail!("incomplete record header")
                 }
             }
         }
@@ -160,7 +160,7 @@ where
     Inner: Write,
 {
     /// Write a record. Will not write records that exceed max_record_size.
-    fn write_record<'a>(&'a mut self, data: &[u8]) -> Result<()> {
+    fn write_record(&mut self, data: &[u8]) -> Result<()> {
         match self.format {
             Format::Chunk => self.fd.write_all(data).map_err(Into::into),
             Format::Record => write_record(&mut self.fd, data),
@@ -176,12 +176,109 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     use crate::test_util::*;
 
+    struct InterruptedThenReader {
+        data: Vec<u8>,
+        pos: usize,
+        interrupted: bool,
+    }
+
+    impl InterruptedThenReader {
+        fn new(data: &[u8]) -> Self {
+            Self {
+                data: data.to_vec(),
+                pos: 0,
+                interrupted: false,
+            }
+        }
+    }
+
+    impl Read for InterruptedThenReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if !self.interrupted {
+                self.interrupted = true;
+                return Err(std::io::Error::new(ErrorKind::Interrupted, "interrupted"));
+            }
+            if self.pos >= self.data.len() {
+                return Ok(0);
+            }
+            let n = std::cmp::min(buf.len(), self.data.len() - self.pos);
+            buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn read_to_end_partial_handles_interrupted() {
+        let mut reader = InterruptedThenReader::new(&[1, 2, 3, 4]);
+        let mut out = [0_u8; 4];
+        let n = read_to_end_partial(&mut reader, &mut out).unwrap();
+        assert_eq!(n, 4);
+        assert_eq!(out, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn record_incomplete_header_returns_err() {
+        let mut rr = IoRecordReader::from_read(Cursor::new(vec![0, 0, 0, 0]), Format::Record, 10);
+        assert!(rr.maybe_read_record().is_err());
+    }
+
+    #[test]
+    fn record32_incomplete_header_returns_err() {
+        let mut rr = IoRecordReader::from_read(Cursor::new(vec![0, 0]), Format::Record32, 10);
+        assert!(rr.maybe_read_record().is_err());
+    }
+
+    #[test]
+    fn record_incomplete_payload_returns_err() {
+        let mut buf = vec![0_u8; 8 + 2];
+        NetworkEndian::write_u64(&mut buf[..8], 3);
+        let mut rr = IoRecordReader::from_read(Cursor::new(buf), Format::Record, 10);
+        assert!(rr.maybe_read_record().is_err());
+    }
+
+    #[test]
+    fn record32_incomplete_payload_returns_err() {
+        let mut buf = vec![0_u8; 4 + 1];
+        NetworkEndian::write_u32(&mut buf[..4], 2);
+        let mut rr = IoRecordReader::from_read(Cursor::new(buf), Format::Record32, 10);
+        assert!(rr.maybe_read_record().is_err());
+    }
+
+    #[test]
+    fn create_new_refuses_existing_path() {
+        let td = tempfile::TempDir::with_prefix("rust-test").unwrap();
+        let f1 = td.path().join("f1");
+
+        let _w = IoRecordWriter::create_new(&f1, Format::Chunk).unwrap();
+        assert!(IoRecordWriter::create_new(&f1, Format::Chunk).is_err());
+    }
+
+    #[test]
+    fn reader_into_inner_returns_reader() {
+        let rr = IoRecordReader::from_read(Cursor::new(b"xyz".to_vec()), Format::Chunk, 8);
+        let mut inner = rr.into_inner();
+        let mut out = Vec::new();
+        inner.read_to_end(&mut out).unwrap();
+        assert_eq!(out, b"xyz");
+    }
+
+    #[test]
+    fn writer_into_inner_returns_written_bytes() {
+        let mut w = IoRecordWriter::new(Vec::new(), Format::Chunk);
+        w.write_record(b"abc").unwrap();
+        w.flush().unwrap();
+        let out = w.into_inner();
+        assert_eq!(out, b"abc");
+    }
+
     fn file_file(format: Format) {
         // Yes, we can only do one at a time.
-        let td = tempdir::TempDir::new("rust-test").unwrap();
+        let td = tempfile::TempDir::with_prefix("rust-test").unwrap();
         let f1 = td.path().join("f1");
 
         test_general(
@@ -189,6 +286,25 @@ mod tests {
             |format| IoRecordWriter::create(&f1, format).unwrap(),
             |_, format, max_read_size| IoRecordReader::open(&f1, format, max_read_size).unwrap(),
         );
+        match format {
+            Format::Record | Format::Record32 => {
+                test_records_toobig_format(
+                    format,
+                    |format| IoRecordWriter::create(&f1, format).unwrap(),
+                    |_, format, max_read_size| {
+                        IoRecordReader::open(&f1, format, max_read_size).unwrap()
+                    },
+                );
+                test_records_max_size_boundary(
+                    format,
+                    |format| IoRecordWriter::create(&f1, format).unwrap(),
+                    |_, format, max_read_size| {
+                        IoRecordReader::open(&f1, format, max_read_size).unwrap()
+                    },
+                );
+            }
+            Format::Chunk => {}
+        }
     }
 
     #[test]
@@ -201,9 +317,14 @@ mod tests {
         file_file(Format::Chunk)
     }
 
+    #[test]
+    fn file_file_records32() {
+        file_file(Format::Record32)
+    }
+
     fn file_memory(format: Format) {
         // Yes, we can only do one at a time.
-        let td = tempdir::TempDir::new("rust-test").unwrap();
+        let td = tempfile::TempDir::with_prefix("rust-test").unwrap();
         let f1 = td.path().join("f1");
 
         test_general(
@@ -219,6 +340,35 @@ mod tests {
                 BufferRecordReader::new(std::fs::read(&f1).unwrap().into(), format, max_read_size)
             },
         );
+        match format {
+            Format::Record | Format::Record32 => {
+                test_records_toobig_format(
+                    format,
+                    |format| IoRecordWriter::create(&f1, format).unwrap(),
+                    |fw, format, max_read_size| {
+                        std::mem::drop(fw);
+                        BufferRecordReader::new(
+                            std::fs::read(&f1).unwrap().into(),
+                            format,
+                            max_read_size,
+                        )
+                    },
+                );
+                test_records_max_size_boundary(
+                    format,
+                    |format| IoRecordWriter::create(&f1, format).unwrap(),
+                    |fw, format, max_read_size| {
+                        std::mem::drop(fw);
+                        BufferRecordReader::new(
+                            std::fs::read(&f1).unwrap().into(),
+                            format,
+                            max_read_size,
+                        )
+                    },
+                );
+            }
+            Format::Chunk => {}
+        }
     }
 
     #[test]
@@ -231,9 +381,14 @@ mod tests {
         file_memory(Format::Chunk)
     }
 
+    #[test]
+    fn file_memory_records32() {
+        file_memory(Format::Record32)
+    }
+
     fn memory_file(format: Format) {
         // Yes, we can only do one at a time.
-        let td = tempdir::TempDir::new("rust-test").unwrap();
+        let td = tempfile::TempDir::with_prefix("rust-test").unwrap();
         let f1 = td.path().join("f1");
 
         let writer = |format| BufferRecordWriter::new(format);
@@ -244,7 +399,13 @@ mod tests {
         };
 
         test_general(format, writer, reader);
-        test_records_toobig(writer, reader);
+        match format {
+            Format::Record | Format::Record32 => {
+                test_records_toobig_format(format, writer, reader);
+                test_records_max_size_boundary(format, writer, reader);
+            }
+            Format::Chunk => {}
+        }
     }
 
     #[test]
@@ -255,5 +416,10 @@ mod tests {
     #[test]
     fn memory_file_chunks() {
         memory_file(Format::Chunk)
+    }
+
+    #[test]
+    fn memory_file_records32() {
+        memory_file(Format::Record32)
     }
 }
